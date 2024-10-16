@@ -1,0 +1,103 @@
+In the source code, the program takes txt files as input 
+and generate webcrawler_task object. 
+
+This webcrawler_task conducts following actions:
+    1. Read txt file lines by lines and extract urls as a list
+    2. Count the duration of the crawling
+    3. Initialize a webcrawler_BFS object
+    4. Start the crawling task and trace the completion of task
+    5. Get log from webcrawler_BFS object and output log file
+
+When the webcrawler_BFS initializes, it will do several things:
+    1. Normalize the urls in seed list
+    2. Initialize data structures:
+        2-1. priority queue: 
+                collect hyperlinks ready to crawl with their priority and depth
+        2-2. visited set:
+                record the sites visited
+        2-3. crawled array:
+                collect the sites crawled
+        2-4. log queue:
+                collect output log including time, size, depth, url, code
+
+    3. Put all urls in seed list into priority queue
+    4. Setting hash maps for computing priority based on frequency of domain
+       and compute occurrence of domain in seed list
+    5. Initialize a robots.txt cache, set the expiration as 3600 sec by default
+       and cache robots.txt of urls on the seed list
+    6. Set several threading locks to avoid race conditions
+
+Once the webcrawler_task.start_task() is called, timer starts to count 
+and webcrawler_BFS.crawl() is called at the same time:
+    1. First, the program will check if number of crawled site satisfied the max_crawl
+    2. If not, the program will keep taking the link with highest priority from priority queue
+    3. If this link has not been visited, assign a thread for processing this link
+    4. process_url() is called
+    5. Following robots.txt, a delay is given to reduce server' burden
+    6. Setting max_workers is based on the configuration of machine running this program
+    7. Reasons of using multithreading at here:
+       Download the content through network is time-consuming comparing to other operations.
+       Hence, it makes sence to let other thread to process download content instead of just waiting.
+       Too much workers may have overhead, 10 workers is a reasonable pick for my device.
+    8. Waiting all threads are completed
+
+
+When process_url() is called, couples of actions will be taken:
+    1. Try to fetch the header, content, url, code from http response.
+       1-1. Initialize Redirect_Handler and use urllib.request.HTTPRedirectHandler..redirect_request
+            to handle url redirection issues
+       1-2. Setting reasonable timeout based on network connection and response time from servers
+       1-3. Using appropriate headers to pass the robot blocking.
+
+    2. Set this url is visited
+    3. Check content type is "HTML", which is this crawler focus on
+    4. Using BeautifulSoup to parse html file for further hyperlinks extraction
+    5. Only continue find hyperlinks if current depth is less than max_depth
+    6. Find a tag, href tag and get the link
+    7. Normalize link
+       7-1. Using urllib to handle the relative path
+       7-2. Establish some rules to avoid duplicated urls
+       7-3. Abandon some useless link by filtering some keywords in query part of url
+       7-4. These rules may need to optimize in future to have better performance on url normalization
+
+    8. Checking the link is crawlable
+       8-1. Only crawl the sites in nz domain as the requirement said
+       8-2. The link not in visited set
+       8-3. The link not in priority queue using bloom filter(memory efficient but could have false positive)
+       8-4. Skip not desired url patterns
+       8-5. Following robots.txt if the site is crawlable
+
+    9. Adding the link to bloom filter
+       Reasons I use the bloom filter here rather than set 
+       is that hyperlinks we visited are supposed to be exponentially larger than visited set. 
+       Comparing to maintain another set, I think using bloom filter would be memory friendly.
+       The false positive rate can be controlled by setting reasonable bit array size and number of hash function.
+
+    10. Determine the priority of this link by passing into get_priority method
+        10-1. Since this program perform BFS crawling, it is prefer to explore the site with different domain.
+              Therefore, recording the occurrence of each domain so far is the key to compute the priority.
+        10-2. There are two kinds of domains using to determine priority:
+              all_domain: url.netloc without "www", 
+                          because "www.example.co.nz" is not too much different from "info.example.co.nz"
+              level2_domain: the last two part of url.netloc such as "co.nz", "ac.nz", or "example.nz"
+              To perform broader exploration, level2_domain has higher impact on priority than all_domain.
+              Dynamically adjusting the priority based on above factors as crawling going.
+        10-3. As the depth increase, there is a depth penalty on priority.
+        10-4. For the shorter path part, a little bonus to the priority
+        10-5. If the link has same domain with its parent link, there is a penalty for this.
+        10-6. Based on above rules, the crawler is much prefer to explore different domains and less visited domain so far.
+        10-7. Through adjusting the parameter, the behavior of the crawler can be controlled and optimized.
+
+    11. Push hyperlinks into priority queue
+    12. Writing log when needed during crawling process
+
+Disclosure:
+    This code is completed by referring following websites and tools:
+        Python official documentations
+        Medium 
+        Stack Overflow 
+        LLM tools
+        GeeksforGeeks
+        Course website: http://engineering.nyu.edu/~suel/cs6913/
+
+
