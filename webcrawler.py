@@ -13,7 +13,7 @@ from threading import Lock
 import tldextract
 import logging
 import json
-from typing import List, Tuple, Optional, Deque, Dict, Any
+from typing import List, Tuple, Optional, Deque, Dict, Any, Union
 
 
 logger = logging.getLogger(__name__)
@@ -95,7 +95,15 @@ class webcrawler_BFS:
                  bloom_initial_capacity=100000,
                  bloom_error_rate=0.001,
                  rate_limit_min_interval=0.5,
-                 query_param_blocklist=None):
+                 per_host_burst_capacity=1,
+                 query_param_blocklist=None,
+                 # Priority weights
+                 level2_weight=0.15,
+                 all_weight=0.05,
+                 same_domain_penalty=0.35,
+                 depth_penalty_shallow=0.3,
+                 depth_penalty_deep=0.2,
+                 short_path_bonus=-0.1):
         # urls to crawl
         self.urls = urls
         for i in range(len(urls)):
@@ -126,13 +134,19 @@ class webcrawler_BFS:
             'Upgrade-Insecure-Requests': '1',
         }
         self.request_timeout = request_timeout
-        self.query_param_blocklist = query_param_blocklist or [
-            re.compile(r'^utm_'),
-            re.compile(r'^fbclid$'),
-            re.compile(r'^gclid$'),
-            re.compile(r'^mc_cid$'),
-            re.compile(r'^mc_eid$'),
+        patterns: List[Union[str, re.Pattern[str]]] = query_param_blocklist or [
+            r'^utm_', r'^fbclid$', r'^gclid$', r'^mc_cid$', r'^mc_eid$'
         ]
+        self.query_param_blocklist = [
+            (re.compile(p) if isinstance(p, str) else p) for p in patterns
+        ]
+        # Priority weights (configurable)
+        self.level2_weight = float(level2_weight)
+        self.all_weight = float(all_weight)
+        self.same_domain_penalty = float(same_domain_penalty)
+        self.depth_penalty_shallow = float(depth_penalty_shallow)
+        self.depth_penalty_deep = float(depth_penalty_deep)
+        self.short_path_bonus = float(short_path_bonus)
         # Shared opener
         self.opener = urllib.request.build_opener(Redirect_Handler())
 
@@ -165,10 +179,11 @@ class webcrawler_BFS:
         self.level2_domain_freq_lock = Lock()
         self.total_domain_num_lock = Lock()
 
-        # per-host rate limiting
-        self.host_last_fetch_time = defaultdict(float)
-        self.rate_limit_min_interval = rate_limit_min_interval
-        self.rate_lock = Lock()
+        # per-host token-bucket rate limiting
+        self.rate_limit_min_interval = float(rate_limit_min_interval)
+        self.per_host_burst_capacity = int(per_host_burst_capacity)
+        # host -> {tokens, capacity, last_ts, rate_per_sec}
+        self._host_buckets: Dict[str, Dict[str, float]] = {}
 
     # Fetch the url
     def fetch_url(self, url):
@@ -275,21 +290,21 @@ class webcrawler_BFS:
 
         # depth penalty
         if depth < 2:
-            dynamic_adjustment += 0.3
+            dynamic_adjustment += self.depth_penalty_shallow
         else:
-            dynamic_adjustment += 0.2
+            dynamic_adjustment += self.depth_penalty_deep
 
         # short path bonus
         if len(link.path) < 30:
-            dynamic_adjustment -= 0.1
+            dynamic_adjustment += self.short_path_bonus
 
         # same domain penalty
         if url_all_domain == link_all_domain:
-            dynamic_adjustment += 0.35
+            dynamic_adjustment += self.same_domain_penalty
 
         # define the impact of the domain frequency
-        level2_weight = 0.15
-        all_weight = 0.05
+        level2_weight = self.level2_weight
+        all_weight = self.all_weight
 
         with self.all_domain_freq_lock:
             self.all_domain_freq[link_all_domain] += 1
@@ -332,18 +347,6 @@ class webcrawler_BFS:
     # Process the url and hyperlinks
     def process_url(self, priority, depth, url):
         try:
-            # Per-host rate limit (combine robots crawl-delay with base interval)
-            robots_delay = self.robots_cache.crawl_delay(url) or 0
-            host = urlparse(url).netloc.lower()
-            with self.rate_lock:
-                last = self.host_last_fetch_time.get(host, 0.0)
-                min_interval = max(
-                    self.rate_limit_min_interval, float(robots_delay))
-                wait = last + min_interval - time_module.time()
-                if wait > 0:
-                    time_module.sleep(wait)
-                self.host_last_fetch_time[host] = time_module.time()
-
             headers, content, final_url, status = self.fetch_url(url)
 
             with self.visited_lock:
@@ -385,7 +388,7 @@ class webcrawler_BFS:
 
                             with self.pq_lock:
                                 self.pq.put((new_priority, depth + 1, link))
-                             logging.debug('Adding: %s', link)
+                            logging.debug('Adding: %s', link)
 
             else:
                 with self.log_lock:
@@ -397,6 +400,31 @@ class webcrawler_BFS:
             pass
 
     # Execute the crawling process
+    def _get_or_init_bucket(self, host: str, url_for_robots: str) -> Dict[str, float]:
+        if host not in self._host_buckets:
+            robots_delay = self.robots_cache.crawl_delay(url_for_robots) or 0
+            interval = max(self.rate_limit_min_interval, float(robots_delay) if robots_delay else self.rate_limit_min_interval)
+            rate = 1.0 / interval if interval > 0 else 1.0
+            self._host_buckets[host] = {
+                'tokens': float(self.per_host_burst_capacity),
+                'capacity': float(self.per_host_burst_capacity),
+                'last_ts': time_module.time(),
+                'rate': rate,
+            }
+        return self._host_buckets[host]
+
+    def _try_consume_token(self, host: str, url_for_robots: str) -> bool:
+        bucket = self._get_or_init_bucket(host, url_for_robots)
+        now = time_module.time()
+        elapsed = now - bucket['last_ts']
+        if elapsed > 0:
+            bucket['tokens'] = min(bucket['capacity'], bucket['tokens'] + elapsed * bucket['rate'])
+            bucket['last_ts'] = now
+        if bucket['tokens'] >= 1.0:
+            bucket['tokens'] -= 1.0
+            return True
+        return False
+
     def crawl(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = []
@@ -414,9 +442,16 @@ class webcrawler_BFS:
                     if url in self.visited:
                         continue
 
-                logging.info('Crawling: %s', url)
-                futures.append(executor.submit(
-                    self.process_url, priority, depth, url))
+                host = urlparse(url).netloc.lower()
+                if self._try_consume_token(host, url):
+                    logging.info('Crawling: %s', url)
+                    futures.append(executor.submit(
+                        self.process_url, priority, depth, url))
+                else:
+                    # Not ready yet, requeue and yield briefly
+                    with self.pq_lock:
+                        self.pq.put((priority, depth, url))
+                    time_module.sleep(0.05)
 
             for future in concurrent.futures.as_completed(futures):
                 try:

@@ -4,10 +4,11 @@ A multi-threaded web crawler centered on a BFS strategy with a priority queue, t
 
 ### Key Features
 - Multi-threaded fetching with `ThreadPoolExecutor`
-- robots.txt cache with per-domain `crawl-delay` politeness
+- robots.txt cache with per-domain `crawl-delay` politeness (requests are fetched once and parsed via RobotFileParser.parse to avoid duplicate GETs)
 - Priority queue that promotes domain diversity and penalizes depth
 - Scalable Bloom Filter to reduce duplicate enqueues
 - Custom redirect handler with a maximum redirection limit
+ - Configurable headers/timeout/workers/rate-limits via `crawler_config.json`
 
 ### Repository Layout
 - `webcrawler.py`: main program and core classes (`robots_cache`, `Redirect_Handler`, `webcrawler_BFS`, `webcrawler_task`).
@@ -93,6 +94,32 @@ This project applies standard IR/crawling techniques adapted for breadth-first e
 - Worker count: `ThreadPoolExecutor(max_workers=8)`
 - robots cache expiry: `robots_cache(expired_time=3600)` seconds
 - Priority weights: tune in `get_priority` (depth penalty, same-domain penalty, short-path bonus, level-2/all-domain weights)
+
+### External configuration (optional)
+Create a `crawler_config.json` to override runtime parameters without code changes:
+
+```json
+{
+  "seed_files": ["crawl_list1.txt", "crawl_list2.txt"],
+  "crawler": {
+    "max_depth": 80,
+    "max_crawl": 500,
+    "max_workers": 8,
+    "request_timeout": 30,
+    "rate_limit_min_interval": 0.75,
+    "per_host_burst_capacity": 2,
+    "bloom_initial_capacity": 500000,
+    "bloom_error_rate": 0.0005,
+    "query_param_blocklist": ["^utm_", "^fbclid$", "^gclid$"],
+    "level2_weight": 0.15,
+    "all_weight": 0.05,
+    "same_domain_penalty": 0.35,
+    "depth_penalty_shallow": 0.3,
+    "depth_penalty_deep": 0.2,
+    "short_path_bonus": -0.1
+  }
+}
+```
 
 ### Ethics and Legal
 - Only crawl `.nz` domains, and always honor robots.txt and crawl delays
