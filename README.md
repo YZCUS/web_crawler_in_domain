@@ -121,6 +121,49 @@ Create a `crawler_config.json` to override runtime parameters without code chang
 }
 ```
 
+### crawler_config.json field reference
+
+- seed_files: array of seed list file paths. Each file contains one URL per line.
+- crawler: object containing runtime parameters for `webcrawler_BFS`.
+  - max_depth: maximum crawl depth.
+  - max_crawl: maximum pages to crawl.
+  - max_workers: thread pool size.
+  - request_timeout: per-request timeout in seconds.
+  - rate_limit_min_interval: base minimum interval per host (seconds). Combined with robots crawl-delay (take the larger).
+  - per_host_burst_capacity: token bucket burst size per host (integer, >=1).
+  - bloom_initial_capacity: initial capacity for the Scalable Bloom Filter.
+  - bloom_error_rate: error rate for the Scalable Bloom Filter.
+  - query_param_blocklist: array of regex strings for query parameters to drop (e.g., "^utm_", "^fbclid$", "^gclid$").
+  - level2_weight / all_weight: weights for domain diversity adjustments.
+  - same_domain_penalty: penalty when the child link is in the same domain as parent.
+  - depth_penalty_shallow / depth_penalty_deep: depth penalties (shallow < 2 vs deep >= 2).
+  - short_path_bonus: adjustment for short paths (negative number means a bonus).
+
+#### Log output configuration
+In addition, you can control log file output and rotation via the `logging` section:
+
+```json
+{
+  "seed_files": ["crawl_list1.txt"],
+  "crawler": { "max_crawl": 100 },
+  "logging": {
+    "output_dir": "logs",
+    "filename_pattern": "crawl_{seed}.log",
+    "rotation": {
+      "enabled": true,
+      "max_bytes": 10485760,
+      "backup_count": 5
+    }
+  }
+}
+```
+
+- logging.output_dir: directory to store log files (will be created if missing).
+- logging.filename_pattern: filename pattern; `{seed}` will be replaced with the seed filename stem.
+- logging.rotation.enabled: enable/disable simple size-based rotation.
+- logging.rotation.max_bytes: rotate when log file reaches this size.
+- logging.rotation.backup_count: number of rotated files to keep.
+
 ### Ethics and Legal
 - Only crawl `.nz` domains, and always honor robots.txt and crawl delays
 - Use this code only for lawful, authorized data collection

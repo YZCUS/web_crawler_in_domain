@@ -14,6 +14,8 @@ import tldextract
 import logging
 import json
 from typing import List, Tuple, Optional, Deque, Dict, Any, Union
+import os
+import shutil
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +26,7 @@ class robots_cache:
     def __init__(self, expired_time: int = 3600, opener: Optional[urllib.request.OpenerDirector] = None,
                  headers: Optional[Dict[str, str]] = None, timeout: int = 60):
         self.cache: Dict[str,
-            Tuple[urllib.robotparser.RobotFileParser, float]] = {}
+                         Tuple[urllib.robotparser.RobotFileParser, float]] = {}
         self.expired_time = expired_time
         self.default_opener = opener
         self.default_headers = headers or {}
@@ -403,7 +405,8 @@ class webcrawler_BFS:
     def _get_or_init_bucket(self, host: str, url_for_robots: str) -> Dict[str, float]:
         if host not in self._host_buckets:
             robots_delay = self.robots_cache.crawl_delay(url_for_robots) or 0
-            interval = max(self.rate_limit_min_interval, float(robots_delay) if robots_delay else self.rate_limit_min_interval)
+            interval = max(self.rate_limit_min_interval, float(
+                robots_delay) if robots_delay else self.rate_limit_min_interval)
             rate = 1.0 / interval if interval > 0 else 1.0
             self._host_buckets[host] = {
                 'tokens': float(self.per_host_burst_capacity),
@@ -418,7 +421,8 @@ class webcrawler_BFS:
         now = time_module.time()
         elapsed = now - bucket['last_ts']
         if elapsed > 0:
-            bucket['tokens'] = min(bucket['capacity'], bucket['tokens'] + elapsed * bucket['rate'])
+            bucket['tokens'] = min(
+                bucket['capacity'], bucket['tokens'] + elapsed * bucket['rate'])
             bucket['last_ts'] = now
         if bucket['tokens'] >= 1.0:
             bucket['tokens'] -= 1.0
@@ -468,7 +472,7 @@ class webcrawler_BFS:
 
 
 class webcrawler_task:
-    def __init__(self, crawl_list_path):
+    def __init__(self, crawl_list_path, logging_config: Optional[Dict[str, Any]] = None):
         self.crawl_list_path = crawl_list_path
         with open(crawl_list_path, 'r') as f:
             urls = f.readlines()
@@ -481,6 +485,15 @@ class webcrawler_task:
         # Initialize the webcrawler
         self.crawler = webcrawler_BFS(self.urls)
 
+        # Logging/output settings (externalizable)
+        logging_config = logging_config or {}
+        self.log_output_dir: str = logging_config.get('output_dir', '.')
+        self.log_filename_pattern: str = logging_config.get('filename_pattern', 'log_{seed}.txt')
+        rotation_cfg = logging_config.get('rotation', {})
+        self.log_rotation_enabled: bool = bool(rotation_cfg.get('enabled', False))
+        self.log_rotation_max_bytes: int = int(rotation_cfg.get('max_bytes', 10 * 1024 * 1024))
+        self.log_rotation_backup_count: int = int(rotation_cfg.get('backup_count', 5))
+
     def start_task(self):
         self.start_time = time_module.time()
         self.crawler.crawl()
@@ -488,22 +501,72 @@ class webcrawler_task:
             self.end_time = time_module.time()
         self.crawl_complete = True
 
+    def _resolve_log_path(self) -> str:
+        seed = os.path.splitext(os.path.basename(self.crawl_list_path))[0]
+        filename = self.log_filename_pattern.format(seed=seed)
+        os.makedirs(self.log_output_dir, exist_ok=True)
+        return os.path.join(self.log_output_dir, filename)
+
+    def _rotate_if_needed(self, file_path: str, fh) -> Tuple[str, Any]:
+        if not self.log_rotation_enabled:
+            return file_path, fh
+        try:
+            size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        except OSError:
+            size = 0
+        if size < self.log_rotation_max_bytes:
+            return file_path, fh
+        # Close current handle before rotating
+        try:
+            fh.close()
+        except Exception:
+            pass
+        # Rotate files: filename -> filename.1, filename.1 -> filename.2, ...
+        for i in range(self.log_rotation_backup_count - 1, 0, -1):
+            src = f"{file_path}.{i}"
+            dst = f"{file_path}.{i+1}"
+            if os.path.exists(src):
+                try:
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    shutil.move(src, dst)
+                except Exception:
+                    pass
+        # Move current file to .1
+        try:
+            dst1 = f"{file_path}.1"
+            if os.path.exists(dst1):
+                os.remove(dst1)
+            if os.path.exists(file_path):
+                shutil.move(file_path, dst1)
+        except Exception:
+            pass
+        # Reopen a fresh file
+        new_fh = open(file_path, 'a')
+        return file_path, new_fh
+
     def get_log(self):
-        with open('log_{}.txt'.format(self.crawl_list_path.split('.')[0]), 'w') as f:
+        file_path = self._resolve_log_path()
+        f = open(file_path, 'a')
+        try:
             while not self.crawl_complete or self.crawler.log:
                 if self.crawler.log:
                     time, size, depth, url, status = self.crawler.log.popleft()
                     f.write('Time: {} Depth: {} Status: {} Size: {} URL: {}\n'.format(
                         time, depth, status, size, url))
+                    f.flush()
+                    file_path, f = self._rotate_if_needed(file_path, f)
                 else:
-                    time_module.sleep(1)
+                    time_module.sleep(0.2)
 
             total_crawled = self.crawler.get_count()
-            duration = self.end_time - self.start_time
-            f.write('Total Crawled: {} Duration: {}\n'.format(
-                total_crawled, duration))
-
-        f.close()
+            duration = (self.end_time - self.start_time) if (self.end_time and self.start_time) else 0
+            f.write('Total Crawled: {} Duration: {}\n'.format(total_crawled, duration))
+        finally:
+            try:
+                f.close()
+            except Exception:
+                pass
 
 
 def load_config(path: str = 'crawler_config.json') -> Dict[str, Any]:
@@ -516,13 +579,16 @@ def load_config(path: str = 'crawler_config.json') -> Dict[str, Any]:
 
 if __name__ == '__main__':
 
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(levelname)s %(message)s')
 
     cfg = load_config()
-    seed_files: List[str] = cfg.get('seed_files', ['crawl_list1.txt', 'crawl_list2.txt'])
+    seed_files: List[str] = cfg.get(
+        'seed_files', ['crawl_list1.txt', 'crawl_list2.txt'])
     crawler_kwargs = cfg.get('crawler', {})
 
-    tasks = [webcrawler_task(seed) for seed in seed_files]
+    log_cfg = cfg.get('logging', {})
+    tasks = [webcrawler_task(seed, logging_config=log_cfg) for seed in seed_files]
     for task in tasks:
         task.crawler = webcrawler_BFS(task.urls, **crawler_kwargs)
         task.start_task()
