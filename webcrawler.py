@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 class robots_cache:
     def __init__(self, expired_time: int = 3600, opener: Optional[urllib.request.OpenerDirector] = None,
                  headers: Optional[Dict[str, str]] = None, timeout: int = 60):
-        self.cache: Dict[str, Tuple[urllib.robotparser.RobotFileParser, float]] = {}
+        self.cache: Dict[str,
+            Tuple[urllib.robotparser.RobotFileParser, float]] = {}
         self.expired_time = expired_time
         self.default_opener = opener
         self.default_headers = headers or {}
@@ -44,7 +45,8 @@ class robots_cache:
             robots_url = scheme + domain + "/robots.txt"
             try:
                 opn = opener or self.default_opener or urllib.request.build_opener()
-                req = urllib.request.Request(robots_url, headers=(headers or self.default_headers))
+                req = urllib.request.Request(
+                    robots_url, headers=(headers or self.default_headers))
                 with opn.open(req, timeout=(timeout or self.default_timeout)) as resp:
                     content = resp.read()
                 rp.parse(content.decode(errors='ignore').splitlines())
@@ -75,7 +77,8 @@ class Redirect_Handler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         current = getattr(req, 'redirect_count', 0)
         if current >= self.max_redirections:
-            raise urllib.error.HTTPError(req.get_full_url(), code, "Too many redirects", headers, fp)
+            raise urllib.error.HTTPError(
+                req.get_full_url(), code, "Too many redirects", headers, fp)
         setattr(req, 'redirect_count', current + 1)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -322,7 +325,8 @@ class webcrawler_BFS:
     def print_log(self):
         for log in self.log:
             time, size, depth, url, status = log
-            logging.info('Time: %s Size: %s Depth: %s URL: %s Status: %s', time, size, depth, url, status)
+            logging.info('Time: %s Size: %s Depth: %s URL: %s Status: %s',
+                         time, size, depth, url, status)
         return True
 
     # Process the url and hyperlinks
