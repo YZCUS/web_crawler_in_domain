@@ -21,6 +21,7 @@ venv/
 log_*.txt
 log_crawl_list*.txt
 max_crawl_6000/
+ps1.pdf
 
 # 發佈產物（若未使用可保留）
 build/
