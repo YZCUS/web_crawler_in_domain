@@ -1,0 +1,35 @@
+# OS / 編輯器
+.DS_Store
+.idea/
+.vscode/
+
+# Python 一般
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+.python-version
+
+# 虛擬環境
+venv/
+.venv/
+.env/
+
+# 專案輸出與暫存
+*.log
+log_*.txt
+log_crawl_list*.txt
+max_crawl_6000/
+
+# 發佈產物（若未使用可保留）
+build/
+dist/
+*.egg-info/
+eggs/
+parts/
+sdist/
+develop-eggs/
+pip-wheel-metadata/
+
+
