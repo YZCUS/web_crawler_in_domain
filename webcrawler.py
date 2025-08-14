@@ -27,19 +27,20 @@ class robots_cache:
                 return rp
 
         rp = urllib.robotparser.RobotFileParser()
-        robots_url = 'http://' + domain + '/robots.txt'
-        rp.set_url(robots_url)
-
-        try:
-            response = urllib.request.urlopen(robots_url, timeout=60)
-            if response.getcode() == 200:
+        # Try HTTPS first, then fall back to HTTP. Avoid duplicate network calls.
+        for scheme in ("https://", "http://"):
+            robots_url = scheme + domain + "/robots.txt"
+            try:
+                rp.set_url(robots_url)
                 rp.read()
-            else:
-                rp.allow_all = True
+                self.cache[domain] = (rp, time_module.time())
+                return rp
+            except Exception:
+                # Try next scheme
+                continue
 
-        except Exception as e:
-            rp.allow_all = True
-
+        # If both attempts fail, allow all to avoid blocking the crawl entirely.
+        rp.allow_all = True
         self.cache[domain] = (rp, time_module.time())
         return rp
 
@@ -179,7 +180,14 @@ class webcrawler_BFS:
 
     # Check if the url is crawlable
     def isHtml(self, url):
-        return not url.endswith(('.rss', '.ico', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', 'pdf', 'css', 'js', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.aspx')) and not url.startswith(('mailto:', 'tel:', 'javascript:', 'data:', 'ftp:', 'file:'))
+        # Skip non-HTML resources and non-http(s) schemes
+        return (
+            not url.endswith((
+                '.rss', '.ico', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg',
+                '.pdf', '.css', '.js', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.aspx'
+            ))
+            and not url.startswith(('mailto:', 'tel:', 'javascript:', 'data:', 'ftp:', 'file:'))
+        )
 
     def in_nz_domain(self, url):
         url = urlparse(url).netloc
@@ -285,7 +293,7 @@ class webcrawler_BFS:
                                                         time_module.localtime()), '0', str(depth), final_url, str(status))
                     return
 
-            if headers.get_content_type() == 'text/html':
+            if headers and headers.get_content_type() == 'text/html':
                 page_size = len(content)
                 with self.crawled_lock:
                     self.crawled.append(final_url)
@@ -301,6 +309,9 @@ class webcrawler_BFS:
 
                     for atag in atags:
                         link = atag.get('href')
+                        # Skip empty and non-navigational links early
+                        if not link or link.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
+                            continue
                         link = self.normalize_url(final_url, link)
 
                         if self.isCrawlable(link):
@@ -329,7 +340,7 @@ class webcrawler_BFS:
             futures = []
             while True:
                 with self.crawled_lock:
-                    if len(self.crawled) > self.max_crawl:
+                    if len(self.crawled) >= self.max_crawl:
                         break
 
                 with self.pq_lock:
@@ -367,8 +378,7 @@ class webcrawler_task:
         self.crawl_list_path = crawl_list_path
         with open(crawl_list_path, 'r') as f:
             urls = f.readlines()
-        self.urls = [url.strip() for url in urls]
-        f.close()
+        self.urls = [url.strip() for url in urls if url.strip()]
 
         self.crawl_complete = False
         self.start_time = None
