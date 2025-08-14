@@ -22,6 +22,11 @@ log_*.txt
 log_crawl_list*.txt
 max_crawl_6000/
 ps1.pdf
+readme.txt
+explain.txt
+crawl_list1.txt
+crawl_list2.txt
+nz_domain_seeds_list.txt
 
 # 發佈產物（若未使用可保留）
 build/
