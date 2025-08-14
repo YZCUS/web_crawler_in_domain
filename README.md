@@ -1,65 +1,113 @@
-## Webcrawler（NZ 網域 BFS 網頁爬蟲）
+## Webcrawler (BFS-based, NZ domain focused)
 
-一個以 BFS 與優先順序佇列為核心的多執行緒網頁爬蟲，聚焦於 `.nz` 網域，支援 robots.txt、導向處理、超連結正規化，以及以 Bloom Filter 降低記憶體占用。
+A multi-threaded web crawler centered on a BFS strategy with a priority queue, targeting only the `.nz` TLD. It respects robots.txt (with caching and crawl-delay), follows redirects with a safety cap, normalizes hyperlinks aggressively, and uses a Bloom filter to reduce memory footprint.
 
-### 特色
-- **多執行緒**：使用 ThreadPoolExecutor 以提升下載效率。
-- **遵守 robots.txt**：快取 robots 規則並尊重 `crawl-delay`。
-- **優先佇列策略**：依據網域出現頻率與深度動態調整，優先探索「不同且較少被訪問」的網域。
-- **Bloom Filter**：避免重複入列的連結，兼顧記憶體效率。
-- **導向處理**：自訂 redirect handler，限制最大轉址次數。
+### Key Features
+- Multi-threaded fetching with `ThreadPoolExecutor`
+- robots.txt cache with per-domain `crawl-delay` politeness
+- Priority queue that promotes domain diversity and penalizes depth
+- Scalable Bloom Filter to reduce duplicate enqueues
+- Custom redirect handler with a maximum redirection limit
 
-### 專案結構
-- `webcrawler.py`：主程式與核心類別（`webcrawler_BFS`、`webcrawler_task`）。
-- `crawl_list1.txt`, `crawl_list2.txt`：範例種子清單（每行一個 URL）。
-- `log_crawl_list1.txt`, `log_crawl_list2.txt`：範例執行輸出（已在 `.gitignore` 忽略）。
-- `explain.txt`：爬蟲流程與設計說明。
-- `readme.txt`：原始說明文件（保留）。
+### Repository Layout
+- `webcrawler.py`: main program and core classes (`robots_cache`, `Redirect_Handler`, `webcrawler_BFS`, `webcrawler_task`).
+- `crawl_list1.txt`, `crawl_list2.txt`: example seed lists (one URL per line).
+- `log_crawl_list1.txt`, `log_crawl_list2.txt`: example outputs (ignored by VCS).
+- `explain.txt`: high-level explanation of flow and design.
+- `readme.txt`: original text readme (kept for reference).
 
-### 環境需求
+### Environment
 - Python 3.12+
-- 相依套件見 `requirements.txt`
+- Dependencies: see `requirements.txt`
 
-### 安裝
+### Installation
 ```bash
 python3 -m venv venv
-source venv/bin/activate  # Windows 使用: venv\\Scripts\\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 使用方式
-1) 準備種子清單：在 `crawl_list1.txt`、`crawl_list2.txt` 中放入要起始抓取的 URL（每行一個，需含協定，例如 `https://example.nz/`）。
+### Usage
+1) Prepare seed lists: put start URLs in `crawl_list1.txt` and/or `crawl_list2.txt` (one per line, include scheme, e.g., `https://example.nz/`).
 
-2) 執行：
+2) Run:
 ```bash
 python webcrawler.py
 ```
 
-3) 產出：
-- 於專案根目錄輸出 `log_crawl_list1.txt` 與 `log_crawl_list2.txt`，內容包含時間、深度、狀態碼、大小與 URL。
+3) Outputs:
+- The crawler writes `log_crawl_list1.txt` and `log_crawl_list2.txt` into the repo root. Each line contains time, depth, HTTP status, size, and URL.
 
-### 重要設定（於 `webcrawler.py`）
-- **`max_depth`**：最大抓取深度（預設 100）。
-- **`max_crawl`**：最大抓取頁數（預設 200）。
-- **執行緒數量**：`ThreadPoolExecutor(max_workers=8)` 中的 8 可依機器調整。
-- **robots 快取時間**：`robots_cache(expired_time=3600)`，秒為單位。
-- **優先權策略**：在 `get_priority` 中可調整各權重（深度懲罰、同網域懲罰、短路徑加分、網域頻率比重等）。
+### Core Techniques and Concepts
+This project applies standard IR/crawling techniques adapted for breadth-first exploration with fairness and politeness constraints:
 
-### 合規與注意事項
-- 僅抓取 `.nz` 網域（`in_nz_domain`）。
-- 尊重網站的 `robots.txt` 規範與 `crawl-delay`，避免過度請求。
-- 僅用於合法、合規且取得授權的資料蒐集情境。
+- URL and HTML handling
+  - Fetching with a desktop User-Agent and reasonable timeouts
+  - Content-type filter: only process `text/html`
+  - HTML parsed by BeautifulSoup to extract `<a href>` links
+  - URL normalization rules:
+    - Absolute resolution via `urljoin`
+    - Lowercase scheme/host, remove fragments
+    - Heuristic trailing slash for directory-like paths
+    - Drop tracking query params (e.g., `utm_*`), collapse RSS/XML endpoints
+  - Non-HTML and non-HTTP(S) schemes are skipped (images, media, `mailto:`, `javascript:`, etc.)
 
-### 疑難排解
-- 若安裝失敗，請先升級 pip：`python -m pip install -U pip`。
-- 若連線逾時或頻繁轉址，可調整 `timeout` 與 `max_redirections`。
-- 若日誌檔案過大，請定期清理（已透過 `.gitignore` 避免加入版本控管）。
+- Scope restriction
+  - Only `.nz` domains are crawlable (`in_nz_domain`) to bound the crawl space and comply with assignment requirements
 
-### 開發建議
-- 先以少量種子與較小 `max_crawl` 測試，確認策略與效能後再擴大規模。
-- 若要更改任務或清單，可修改 `__main__` 中的 `webcrawler_task('your_list.txt')`。
+- Politeness and robots.txt
+  - Per-domain robots.txt is cached with an expiry (`robots_cache`)
+  - `can_fetch` is consulted before enqueuing/visiting
+  - `crawl_delay` is respected between fetches to avoid overloading hosts
 
-### 授權
-未指定（如需開源授權，建議新增 `LICENSE`）。
+- Frontier data structures
+  - A min-heap priority queue holds tuples `(priority, depth, url)`
+  - A visited set guards already-fetched final URLs (post-redirect)
+  - A Scalable Bloom Filter tracks seen links to reduce duplicate enqueues at scale
+  - Thread-safe operations are protected by fine-grained locks (visited, links, PQ, logs, and domain stats)
+
+- Priority model (domain diversity and depth-aware)
+  - Penalize deeper pages; small bonus for short paths
+  - Penalize links staying in the same domain as the parent
+  - Maintain occurrence counts for:
+    - all-domain: full host without leading `www.`
+    - level-2 domain: last two labels (e.g., `co.nz`, `ac.nz`, or `example.nz`)
+  - Convert counts to ratios against a running total; subtract weighted ratios from priority to prefer less-seen domains
+  - All counters are updated with locks to remain thread-safe
+
+- Redirect handling
+  - A custom `HTTPRedirectHandler` enforces a maximum number of redirects to prevent cycles and long chains
+
+- Concurrency model
+  - Fetching is I/O-bound; threads hide latency while maintaining politeness
+  - `ThreadPoolExecutor(max_workers=8)` is configurable based on machine capability
+  - Exceptions from worker futures are surfaced and logged without crashing the crawl
+
+- Logging
+  - Each processed URL logs: timestamp, content size (if HTML), depth, final URL, and HTTP status
+  - A background loop drains an internal deque and writes to `log_<seed>.txt`
+
+### Configuration Knobs (inside `webcrawler.py`)
+- `max_depth`: maximum exploration depth (default 100)
+- `max_crawl`: maximum number of pages to crawl (default 200)
+- Worker count: `ThreadPoolExecutor(max_workers=8)`
+- robots cache expiry: `robots_cache(expired_time=3600)` seconds
+- Priority weights: tune in `get_priority` (depth penalty, same-domain penalty, short-path bonus, level-2/all-domain weights)
+
+### Ethics and Legal
+- Only crawl `.nz` domains, and always honor robots.txt and crawl delays
+- Use this code only for lawful, authorized data collection
+
+### Troubleshooting
+- If installation fails, upgrade pip: `python -m pip install -U pip`
+- If timeouts or redirect loops occur, adjust request timeouts and `max_redirections`
+- Log files can be large; rotate/clean them as needed (they are ignored by VCS)
+
+### Development Tips
+- Start with a small seed set and low `max_crawl` to verify behavior, then scale up
+- To change tasks or seeds, edit the `__main__` section and the target files
+
+### License
+Not specified. Consider adding a `LICENSE` file if you intend to open-source.
 
 
