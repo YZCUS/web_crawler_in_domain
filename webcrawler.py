@@ -11,15 +11,26 @@ import time as time_module
 import concurrent.futures
 from threading import Lock
 import tldextract
+import logging
+import json
+from typing import List, Tuple, Optional, Deque, Dict, Any
+
+
+logger = logging.getLogger(__name__)
 
 
 # Robots.txt cache
 class robots_cache:
-    def __init__(self, expired_time=3600):
-        self.cache = defaultdict(dict)
+    def __init__(self, expired_time: int = 3600, opener: Optional[urllib.request.OpenerDirector] = None,
+                 headers: Optional[Dict[str, str]] = None, timeout: int = 60):
+        self.cache: Dict[str, Tuple[urllib.robotparser.RobotFileParser, float]] = {}
         self.expired_time = expired_time
+        self.default_opener = opener
+        self.default_headers = headers or {}
+        self.default_timeout = timeout
 
-    def fetch_robots(self, url, opener=None, headers=None, timeout=60):
+    def fetch_robots(self, url: str, opener: Optional[urllib.request.OpenerDirector] = None,
+                     headers: Optional[Dict[str, str]] = None, timeout: Optional[int] = None) -> urllib.robotparser.RobotFileParser:
         domain = urlparse(url).netloc
 
         if domain in self.cache:
@@ -32,10 +43,9 @@ class robots_cache:
         for scheme in ("https://", "http://"):
             robots_url = scheme + domain + "/robots.txt"
             try:
-                if opener is None:
-                    opener = urllib.request.build_opener()
-                req = urllib.request.Request(robots_url, headers=headers or {})
-                with opener.open(req, timeout=timeout) as resp:
+                opn = opener or self.default_opener or urllib.request.build_opener()
+                req = urllib.request.Request(robots_url, headers=(headers or self.default_headers))
+                with opn.open(req, timeout=(timeout or self.default_timeout)) as resp:
                     content = resp.read()
                 rp.parse(content.decode(errors='ignore').splitlines())
                 self.cache[domain] = (rp, time_module.time())
@@ -59,24 +69,20 @@ class robots_cache:
 
 # Redirect handler
 class Redirect_Handler(urllib.request.HTTPRedirectHandler):
-    def __init__(self, max_redirections=10):
+    def __init__(self, max_redirections: int = 10):
         self.max_redirections = max_redirections
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not hasattr(self, 'count'):
-            self.count = 0
-
-        if self.count > self.max_redirections:
-            raise urllib.error.HTTPError(
-                req.get_full_url(), code, "Too many redirects", headers, fp)
-        self.count += 1
-
+        current = getattr(req, 'redirect_count', 0)
+        if current >= self.max_redirections:
+            raise urllib.error.HTTPError(req.get_full_url(), code, "Too many redirects", headers, fp)
+        setattr(req, 'redirect_count', current + 1)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 # Webcrawler using BFS
 class webcrawler_BFS:
-    def __init__(self, urls, *,
+    def __init__(self, urls: List[str], *,
                  max_depth=100,
                  max_crawl=200,
                  max_workers=8,
@@ -92,7 +98,7 @@ class webcrawler_BFS:
         for i in range(len(urls)):
             if self.urls[i][-1] != '/':
                 self.urls[i] += '/'
-        print("Crawling the following urls:", self.urls)
+        logger.info("Crawling the following urls: %s", self.urls)
 
         # data structures
         self.pq = PriorityQueue()
@@ -139,9 +145,12 @@ class webcrawler_BFS:
             self.total_domain_num += 1
 
         # robots.txt cache
-        self.robots_cache = robots_cache(expired_time=robots_expired_time)
+        self.robots_cache = robots_cache(expired_time=robots_expired_time,
+                                         opener=self.opener,
+                                         headers=self.request_headers,
+                                         timeout=self.request_timeout)
         for url in urls:
-            self.robots_cache.fetch_robots(url, opener=self.opener, headers=self.request_headers, timeout=self.request_timeout)
+            self.robots_cache.fetch_robots(url)
 
         # multithreading locks
         self.visited_lock = Lock()
@@ -248,7 +257,8 @@ class webcrawler_BFS:
             # e.g., co.nz
             return extracted.suffix
         # otherwise use registrable domain like example.nz
-        registrable = '.'.join(part for part in [extracted.domain, extracted.suffix] if part)
+        registrable = '.'.join(
+            part for part in [extracted.domain, extracted.suffix] if part)
         return registrable or domain
 
     def get_priority(self, priority, depth, url, link):
@@ -312,8 +322,7 @@ class webcrawler_BFS:
     def print_log(self):
         for log in self.log:
             time, size, depth, url, status = log
-            print('Time:', time, 'Size', size, 'Depth:', depth,
-                  'URL:', url, 'Status:', status)
+            logging.info('Time: %s Size: %s Depth: %s URL: %s Status: %s', time, size, depth, url, status)
         return True
 
     # Process the url and hyperlinks
@@ -324,7 +333,8 @@ class webcrawler_BFS:
             host = urlparse(url).netloc.lower()
             with self.rate_lock:
                 last = self.host_last_fetch_time.get(host, 0.0)
-                min_interval = max(self.rate_limit_min_interval, float(robots_delay))
+                min_interval = max(
+                    self.rate_limit_min_interval, float(robots_delay))
                 wait = last + min_interval - time_module.time()
                 if wait > 0:
                     time_module.sleep(wait)
@@ -371,7 +381,7 @@ class webcrawler_BFS:
 
                             with self.pq_lock:
                                 self.pq.put((new_priority, depth + 1, link))
-                            print('Adding:', link)
+                             logging.debug('Adding: %s', link)
 
             else:
                 with self.log_lock:
@@ -400,16 +410,15 @@ class webcrawler_BFS:
                     if url in self.visited:
                         continue
 
-                print('Crawling:', url)
+                logging.info('Crawling: %s', url)
                 futures.append(executor.submit(
                     self.process_url, priority, depth, url))
-
 
             for future in concurrent.futures.as_completed(futures):
                 try:
                     future.result()
                 except Exception as e:
-                    print(f"An error occurred: {e}")
+                    logging.error("An error occurred: %s", e, exc_info=True)
 
         self.completed = True
         return self.crawled
@@ -458,15 +467,26 @@ class webcrawler_task:
         f.close()
 
 
+def load_config(path: str = 'crawler_config.json') -> Dict[str, Any]:
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
 if __name__ == '__main__':
 
-    task1 = webcrawler_task('crawl_list1.txt')
-    task2 = webcrawler_task('crawl_list2.txt')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-    task1.start_task()
-    task1.get_log()
+    cfg = load_config()
+    seed_files: List[str] = cfg.get('seed_files', ['crawl_list1.txt', 'crawl_list2.txt'])
+    crawler_kwargs = cfg.get('crawler', {})
 
-    task2.start_task()
-    task2.get_log()
+    tasks = [webcrawler_task(seed) for seed in seed_files]
+    for task in tasks:
+        task.crawler = webcrawler_BFS(task.urls, **crawler_kwargs)
+        task.start_task()
+        task.get_log()
 
-    print("All tasks completed")
+    logging.info("All tasks completed")
