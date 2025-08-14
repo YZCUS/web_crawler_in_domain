@@ -1,5 +1,5 @@
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
 import urllib.request
 import urllib.error
 import urllib.robotparser
@@ -10,6 +10,7 @@ from pybloom_live import ScalableBloomFilter
 import time as time_module
 import concurrent.futures
 from threading import Lock
+import tldextract
 
 
 # Robots.txt cache
@@ -18,7 +19,7 @@ class robots_cache:
         self.cache = defaultdict(dict)
         self.expired_time = expired_time
 
-    def fetch_robots(self, url):
+    def fetch_robots(self, url, opener=None, headers=None, timeout=60):
         domain = urlparse(url).netloc
 
         if domain in self.cache:
@@ -27,16 +28,19 @@ class robots_cache:
                 return rp
 
         rp = urllib.robotparser.RobotFileParser()
-        # Try HTTPS first, then fall back to HTTP. Avoid duplicate network calls.
+        # Try HTTPS first, then fall back to HTTP, and reuse opener/headers.
         for scheme in ("https://", "http://"):
             robots_url = scheme + domain + "/robots.txt"
             try:
-                rp.set_url(robots_url)
-                rp.read()
+                if opener is None:
+                    opener = urllib.request.build_opener()
+                req = urllib.request.Request(robots_url, headers=headers or {})
+                with opener.open(req, timeout=timeout) as resp:
+                    content = resp.read()
+                rp.parse(content.decode(errors='ignore').splitlines())
                 self.cache[domain] = (rp, time_module.time())
                 return rp
             except Exception:
-                # Try next scheme
                 continue
 
         # If both attempts fail, allow all to avoid blocking the crawl entirely.
@@ -72,7 +76,17 @@ class Redirect_Handler(urllib.request.HTTPRedirectHandler):
 
 # Webcrawler using BFS
 class webcrawler_BFS:
-    def __init__(self, urls):
+    def __init__(self, urls, *,
+                 max_depth=100,
+                 max_crawl=200,
+                 max_workers=8,
+                 request_headers=None,
+                 request_timeout=60,
+                 robots_expired_time=3600,
+                 bloom_initial_capacity=100000,
+                 bloom_error_rate=0.001,
+                 rate_limit_min_interval=0.5,
+                 query_param_blocklist=None):
         # urls to crawl
         self.urls = urls
         for i in range(len(urls)):
@@ -86,14 +100,32 @@ class webcrawler_BFS:
             self.pq.put((0, 0, url))
 
         self.visited = set()
-        self.links = ScalableBloomFilter()
+        self.links = ScalableBloomFilter(initial_capacity=bloom_initial_capacity,
+                                         error_rate=bloom_error_rate)
         self.crawled = []
         self.log = deque()
 
         # crawler settings
-        self.max_depth = 100
-        self.max_crawl = 200
+        self.max_depth = max_depth
+        self.max_crawl = max_crawl
         self.completed = False
+        self.max_workers = max_workers
+        self.request_headers = request_headers or {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        self.request_timeout = request_timeout
+        self.query_param_blocklist = query_param_blocklist or [
+            re.compile(r'^utm_'),
+            re.compile(r'^fbclid$'),
+            re.compile(r'^gclid$'),
+            re.compile(r'^mc_cid$'),
+            re.compile(r'^mc_eid$'),
+        ]
+        # Shared opener
+        self.opener = urllib.request.build_opener(Redirect_Handler())
 
         # priority settings
         self.level2_domain_freq = defaultdict(int)
@@ -107,9 +139,9 @@ class webcrawler_BFS:
             self.total_domain_num += 1
 
         # robots.txt cache
-        self.robots_cache = robots_cache()
+        self.robots_cache = robots_cache(expired_time=robots_expired_time)
         for url in urls:
-            self.robots_cache.fetch_robots(url)
+            self.robots_cache.fetch_robots(url, opener=self.opener, headers=self.request_headers, timeout=self.request_timeout)
 
         # multithreading locks
         self.visited_lock = Lock()
@@ -121,22 +153,17 @@ class webcrawler_BFS:
         self.level2_domain_freq_lock = Lock()
         self.total_domain_num_lock = Lock()
 
+        # per-host rate limiting
+        self.host_last_fetch_time = defaultdict(float)
+        self.rate_limit_min_interval = rate_limit_min_interval
+        self.rate_lock = Lock()
+
     # Fetch the url
     def fetch_url(self, url):
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-
-        # Redirect handler
-        redirect_handler = Redirect_Handler()
-        opener = urllib.request.build_opener(redirect_handler)
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(url, headers=self.request_headers)
 
         try:
-            with opener.open(req, timeout=60) as response:
+            with self.opener.open(req, timeout=self.request_timeout) as response:
                 headers = response.info()
                 content = response.read()
                 final_url = response.geturl()
@@ -169,10 +196,16 @@ class webcrawler_BFS:
         if not normalized.path.endswith('/') and not normalized.path.split('/')[-1].count('.'):
             normalized = normalized._replace(path=normalized.path + '/')
 
-        del_words = re.compile(r'utm_.*|rss|xml')
-        normalized = normalized._replace(
-            query='&'.join(q for q in normalized.query.split('&') if not del_words.search(q)))
+        # Drop known tracking parameters using configured blocklist
+        if normalized.query:
+            filtered = []
+            for key, value in parse_qsl(normalized.query, keep_blank_values=True):
+                if any(p.match(key) for p in self.query_param_blocklist):
+                    continue
+                filtered.append((key, value))
+            normalized = normalized._replace(query=urlencode(filtered))
 
+        # Collapse explicit RSS/XML endpoints to root
         if re.search(r'\.(rss|xml)$', normalized.path):
             normalized = normalized._replace(path='/', fragment='', query='')
 
@@ -209,10 +242,14 @@ class webcrawler_BFS:
         return domain.lower().lstrip('www.')
 
     def get_level2_domain(self, domain):
-        domain_parts = domain.split('.')
-        if len(domain_parts) > 1:
-            return "".join(domain_parts[-2:])
-        return domain
+        # Use tldextract for robust public suffix parsing
+        extracted = tldextract.extract(domain)
+        if extracted.suffix and '.' in extracted.suffix:
+            # e.g., co.nz
+            return extracted.suffix
+        # otherwise use registrable domain like example.nz
+        registrable = '.'.join(part for part in [extracted.domain, extracted.suffix] if part)
+        return registrable or domain
 
     def get_priority(self, priority, depth, url, link):
         dynamic_adjustment = 0
@@ -282,6 +319,17 @@ class webcrawler_BFS:
     # Process the url and hyperlinks
     def process_url(self, priority, depth, url):
         try:
+            # Per-host rate limit (combine robots crawl-delay with base interval)
+            robots_delay = self.robots_cache.crawl_delay(url) or 0
+            host = urlparse(url).netloc.lower()
+            with self.rate_lock:
+                last = self.host_last_fetch_time.get(host, 0.0)
+                min_interval = max(self.rate_limit_min_interval, float(robots_delay))
+                wait = last + min_interval - time_module.time()
+                if wait > 0:
+                    time_module.sleep(wait)
+                self.host_last_fetch_time[host] = time_module.time()
+
             headers, content, final_url, status = self.fetch_url(url)
 
             with self.visited_lock:
@@ -336,7 +384,7 @@ class webcrawler_BFS:
 
     # Execute the crawling process
     def crawl(self):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = []
             while True:
                 with self.crawled_lock:
@@ -356,8 +404,6 @@ class webcrawler_BFS:
                 futures.append(executor.submit(
                     self.process_url, priority, depth, url))
 
-                crawl_delay = self.robots_cache.crawl_delay(url) or 1
-                time_module.sleep(crawl_delay)
 
             for future in concurrent.futures.as_completed(futures):
                 try:

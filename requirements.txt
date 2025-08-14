@@ -1,4 +1,5 @@
 beautifulsoup4==4.12.3
 pybloom_live==4.0.0
 bitarray==2.9.2
+tldextract==5.1.2
 
