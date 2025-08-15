@@ -130,7 +130,7 @@ class webcrawler_BFS:
         self.completed = False
         self.max_workers = max_workers
         self.request_headers = request_headers or {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
@@ -149,8 +149,9 @@ class webcrawler_BFS:
         self.depth_penalty_shallow = float(depth_penalty_shallow)
         self.depth_penalty_deep = float(depth_penalty_deep)
         self.short_path_bonus = float(short_path_bonus)
-        # Shared opener
+        # Thread-local opener storage
         self._local = threading.local()
+        self._validate_params()
 
         # priority settings
         self.level2_domain_freq = defaultdict(int)
@@ -190,7 +191,8 @@ class webcrawler_BFS:
     # Fetch the url
     def _get_opener(self) -> urllib.request.OpenerDirector:
         if not hasattr(self._local, 'opener'):
-            self._local.opener = urllib.request.build_opener(Redirect_Handler())
+            self._local.opener = urllib.request.build_opener(
+                Redirect_Handler())
         return self._local.opener
 
     def fetch_url(self, url):
@@ -477,6 +479,33 @@ class webcrawler_BFS:
 
         self.completed = True
         return self.crawled
+
+    def _validate_params(self) -> None:
+        if not (isinstance(self.max_crawl, (int, float)) and self.max_crawl > 0):
+            raise ValueError('max_crawl must be > 0')
+        if not (isinstance(self.max_depth, (int, float)) and self.max_depth >= 0):
+            raise ValueError('max_depth must be >= 0')
+        if not (isinstance(self.max_workers, int) and self.max_workers > 0):
+            raise ValueError('max_workers must be a positive integer')
+        if not (isinstance(self.request_timeout, (int, float)) and self.request_timeout > 0):
+            raise ValueError('request_timeout must be > 0')
+        if not (isinstance(self.rate_limit_min_interval, (int, float)) and self.rate_limit_min_interval >= 0):
+            raise ValueError('rate_limit_min_interval must be >= 0')
+        if not (isinstance(self.per_host_burst_capacity, int) and self.per_host_burst_capacity >= 1):
+            raise ValueError('per_host_burst_capacity must be an integer >= 1')
+        for name, val in (
+            ('level2_weight', self.level2_weight),
+            ('all_weight', self.all_weight),
+            ('same_domain_penalty', self.same_domain_penalty),
+            ('depth_penalty_shallow', self.depth_penalty_shallow),
+            ('depth_penalty_deep', self.depth_penalty_deep),
+        ):
+            if not isinstance(val, (int, float)):
+                raise ValueError(f'{name} must be numeric')
+        if not (self.level2_weight >= 0 and self.all_weight >= 0):
+            raise ValueError('level2_weight and all_weight must be >= 0')
+        if self.short_path_bonus > 0:
+            raise ValueError('short_path_bonus should be <= 0 (negative for bonus)')
 
     # Get the number of crawled urls
     def get_count(self):
