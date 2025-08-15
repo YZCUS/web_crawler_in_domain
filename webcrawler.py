@@ -10,6 +10,7 @@ from pybloom_live import ScalableBloomFilter
 import time as time_module
 import concurrent.futures
 from threading import Lock
+import threading
 import tldextract
 import logging
 import json
@@ -181,6 +182,7 @@ class webcrawler_BFS:
         self.all_domain_freq_lock = Lock()
         self.level2_domain_freq_lock = Lock()
         self.total_domain_num_lock = Lock()
+        self.bucket_lock = Lock()
 
         # per-host token-bucket rate limiting
         self.rate_limit_min_interval = float(rate_limit_min_interval)
@@ -272,7 +274,7 @@ class webcrawler_BFS:
             if url in self.links:
                 return False
 
-        return url and self.isHtml(url) and self.in_nz_domain(url) and self.robots_cache.can_fetch(url, headers=self.request_headers, timeout=self.request_timeout)
+        return url and self.isHtml(url) and self.in_nz_domain(url) and self.robots_cache.can_fetch(url)
 
     # Computer priority of the url
     def normalize_www(self, domain):
@@ -426,8 +428,6 @@ class webcrawler_BFS:
 
     def _try_consume_token(self, host: str, url_for_robots: str) -> bool:
         # protect bucket mutations with a lock
-        if not hasattr(self, 'bucket_lock'):
-            self.bucket_lock = Lock()
         with self.bucket_lock:
             bucket = self._get_or_init_bucket(host, url_for_robots)
             now = time_module.time()
