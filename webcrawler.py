@@ -146,11 +146,13 @@ class webcrawler_BFS:
                 try:
                     compiled_blocklist.append(re.compile(p))
                 except re.error as err:
-                    logging.warning('Invalid regex in query_param_blocklist: %s (%s)', p, err)
+                    logging.warning(
+                        'Invalid regex in query_param_blocklist: %s (%s)', p, err)
             elif isinstance(p, re.Pattern):
                 compiled_blocklist.append(p)
             else:
-                logging.warning('Ignoring non-regex pattern in query_param_blocklist: %r', p)
+                logging.warning(
+                    'Ignoring non-regex pattern in query_param_blocklist: %r', p)
         self.query_param_blocklist = compiled_blocklist
         # Priority weights (configurable)
         self.level2_weight = float(level2_weight)
