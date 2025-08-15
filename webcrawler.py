@@ -505,7 +505,8 @@ class webcrawler_BFS:
         if not (self.level2_weight >= 0 and self.all_weight >= 0):
             raise ValueError('level2_weight and all_weight must be >= 0')
         if self.short_path_bonus > 0:
-            raise ValueError('short_path_bonus should be <= 0 (negative for bonus)')
+            raise ValueError(
+                'short_path_bonus should be <= 0 (negative for bonus)')
 
     # Get the number of crawled urls
     def get_count(self):
