@@ -140,9 +140,18 @@ class webcrawler_BFS:
         patterns: List[Union[str, re.Pattern[str]]] = query_param_blocklist or [
             r'^utm_', r'^fbclid$', r'^gclid$', r'^mc_cid$', r'^mc_eid$'
         ]
-        self.query_param_blocklist = [
-            (re.compile(p) if isinstance(p, str) else p) for p in patterns
-        ]
+        compiled_blocklist: List[re.Pattern[str]] = []
+        for p in patterns:
+            if isinstance(p, str):
+                try:
+                    compiled_blocklist.append(re.compile(p))
+                except re.error as err:
+                    logging.warning('Invalid regex in query_param_blocklist: %s (%s)', p, err)
+            elif isinstance(p, re.Pattern):
+                compiled_blocklist.append(p)
+            else:
+                logging.warning('Ignoring non-regex pattern in query_param_blocklist: %r', p)
+        self.query_param_blocklist = compiled_blocklist
         # Priority weights (configurable)
         self.level2_weight = float(level2_weight)
         self.all_weight = float(all_weight)

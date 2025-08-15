@@ -164,6 +164,20 @@ In addition, you can control log file output and rotation via the `logging` sect
 - logging.rotation.max_bytes: rotate when log file reaches this size.
 - logging.rotation.backup_count: number of rotated files to keep.
 
+#### Custom request headers (User-Agent)
+To override the default modern desktop UA, set `crawler.request_headers`:
+
+```json
+{
+  "crawler": {
+    "request_headers": {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    }
+  }
+}
+```
+
 ### Ethics and Legal
 - Only crawl `.nz` domains, and always honor robots.txt and crawl delays
 - Use this code only for lawful, authorized data collection
