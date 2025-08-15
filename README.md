@@ -2,6 +2,10 @@
 
 A multi-threaded web crawler centered on a BFS strategy with a priority queue, targeting only the `.nz` TLD. It respects robots.txt (with caching and crawl-delay), follows redirects with a safety cap, normalizes hyperlinks aggressively, and uses a Bloom filter to reduce memory footprint.
 
+<p align="center">
+  <img src="./crawler-architecture.svg" alt="Crawler Architecture" width="800" />
+</p>
+
 ### Key Features
 - Multi-threaded fetching with `ThreadPoolExecutor`
 - robots.txt cache with per-domain `crawl-delay` politeness (requests are fetched once and parsed via RobotFileParser.parse to avoid duplicate GETs)
