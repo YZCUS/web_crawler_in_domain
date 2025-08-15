@@ -150,7 +150,7 @@ class webcrawler_BFS:
         self.depth_penalty_deep = float(depth_penalty_deep)
         self.short_path_bonus = float(short_path_bonus)
         # Shared opener
-        self.opener = urllib.request.build_opener(Redirect_Handler())
+        self._local = threading.local()
 
         # priority settings
         self.level2_domain_freq = defaultdict(int)
@@ -165,7 +165,7 @@ class webcrawler_BFS:
 
         # robots.txt cache
         self.robots_cache = robots_cache(expired_time=robots_expired_time,
-                                         opener=self.opener,
+                                         opener=None,
                                          headers=self.request_headers,
                                          timeout=self.request_timeout)
         for url in urls:
@@ -188,11 +188,17 @@ class webcrawler_BFS:
         self._host_buckets: Dict[str, Dict[str, float]] = {}
 
     # Fetch the url
+    def _get_opener(self) -> urllib.request.OpenerDirector:
+        if not hasattr(self._local, 'opener'):
+            self._local.opener = urllib.request.build_opener(Redirect_Handler())
+        return self._local.opener
+
     def fetch_url(self, url):
         req = urllib.request.Request(url, headers=self.request_headers)
 
         try:
-            with self.opener.open(req, timeout=self.request_timeout) as response:
+            opener = self._get_opener()
+            with opener.open(req, timeout=self.request_timeout) as response:
                 headers = response.info()
                 content = response.read()
                 final_url = response.geturl()
@@ -264,7 +270,7 @@ class webcrawler_BFS:
             if url in self.links:
                 return False
 
-        return url and self.isHtml(url) and self.in_nz_domain(url) and self.robots_cache.can_fetch(url)
+        return url and self.isHtml(url) and self.in_nz_domain(url) and self.robots_cache.can_fetch(url, headers=self.request_headers, timeout=self.request_timeout)
 
     # Computer priority of the url
     def normalize_www(self, domain):
@@ -417,17 +423,21 @@ class webcrawler_BFS:
         return self._host_buckets[host]
 
     def _try_consume_token(self, host: str, url_for_robots: str) -> bool:
-        bucket = self._get_or_init_bucket(host, url_for_robots)
-        now = time_module.time()
-        elapsed = now - bucket['last_ts']
-        if elapsed > 0:
-            bucket['tokens'] = min(
-                bucket['capacity'], bucket['tokens'] + elapsed * bucket['rate'])
-            bucket['last_ts'] = now
-        if bucket['tokens'] >= 1.0:
-            bucket['tokens'] -= 1.0
-            return True
-        return False
+        # protect bucket mutations with a lock
+        if not hasattr(self, 'bucket_lock'):
+            self.bucket_lock = Lock()
+        with self.bucket_lock:
+            bucket = self._get_or_init_bucket(host, url_for_robots)
+            now = time_module.time()
+            elapsed = now - bucket['last_ts']
+            if elapsed > 0:
+                bucket['tokens'] = min(
+                    bucket['capacity'], bucket['tokens'] + elapsed * bucket['rate'])
+                bucket['last_ts'] = now
+            if bucket['tokens'] >= 1.0:
+                bucket['tokens'] -= 1.0
+                return True
+            return False
 
     def crawl(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -445,6 +455,8 @@ class webcrawler_BFS:
                 with self.visited_lock:
                     if url in self.visited:
                         continue
+                    # early mark to avoid duplicate scheduling
+                    self.visited.add(url)
 
                 host = urlparse(url).netloc.lower()
                 if self._try_consume_token(host, url):
@@ -488,11 +500,15 @@ class webcrawler_task:
         # Logging/output settings (externalizable)
         logging_config = logging_config or {}
         self.log_output_dir: str = logging_config.get('output_dir', '.')
-        self.log_filename_pattern: str = logging_config.get('filename_pattern', 'log_{seed}.txt')
+        self.log_filename_pattern: str = logging_config.get(
+            'filename_pattern', 'log_{seed}.txt')
         rotation_cfg = logging_config.get('rotation', {})
-        self.log_rotation_enabled: bool = bool(rotation_cfg.get('enabled', False))
-        self.log_rotation_max_bytes: int = int(rotation_cfg.get('max_bytes', 10 * 1024 * 1024))
-        self.log_rotation_backup_count: int = int(rotation_cfg.get('backup_count', 5))
+        self.log_rotation_enabled: bool = bool(
+            rotation_cfg.get('enabled', False))
+        self.log_rotation_max_bytes: int = int(
+            rotation_cfg.get('max_bytes', 10 * 1024 * 1024))
+        self.log_rotation_backup_count: int = int(
+            rotation_cfg.get('backup_count', 5))
 
     def start_task(self):
         self.start_time = time_module.time()
@@ -511,7 +527,8 @@ class webcrawler_task:
         if not self.log_rotation_enabled:
             return file_path, fh
         try:
-            size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            size = os.path.getsize(
+                file_path) if os.path.exists(file_path) else 0
         except OSError:
             size = 0
         if size < self.log_rotation_max_bytes:
@@ -560,8 +577,10 @@ class webcrawler_task:
                     time_module.sleep(0.2)
 
             total_crawled = self.crawler.get_count()
-            duration = (self.end_time - self.start_time) if (self.end_time and self.start_time) else 0
-            f.write('Total Crawled: {} Duration: {}\n'.format(total_crawled, duration))
+            duration = (
+                self.end_time - self.start_time) if (self.end_time and self.start_time) else 0
+            f.write('Total Crawled: {} Duration: {}\n'.format(
+                total_crawled, duration))
         finally:
             try:
                 f.close()
@@ -588,7 +607,8 @@ if __name__ == '__main__':
     crawler_kwargs = cfg.get('crawler', {})
 
     log_cfg = cfg.get('logging', {})
-    tasks = [webcrawler_task(seed, logging_config=log_cfg) for seed in seed_files]
+    tasks = [webcrawler_task(seed, logging_config=log_cfg)
+             for seed in seed_files]
     for task in tasks:
         task.crawler = webcrawler_BFS(task.urls, **crawler_kwargs)
         task.start_task()

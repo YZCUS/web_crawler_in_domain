@@ -18,7 +18,7 @@ A multi-threaded web crawler centered on a BFS strategy with a priority queue, t
 - `readme.txt`: original text readme (kept for reference).
 
 ### Environment
-- Python 3.12+
+- Python 3.8+
 - Dependencies: see `requirements.txt`
 
 ### Installation
@@ -37,7 +37,7 @@ python webcrawler.py
 ```
 
 3) Outputs:
-- The crawler writes `log_crawl_list1.txt` and `log_crawl_list2.txt` into the repo root. Each line contains time, depth, HTTP status, size, and URL.
+- The crawler writes `log_<seed>.txt` (or `crawl_{seed}.log` if configured) into the configured folder. Each line contains: `Time: <timestamp> Depth: <depth> Status: <status> Size: <bytes> URL: <url>`.
 
 ### Core Techniques and Concepts
 This project applies standard IR/crawling techniques adapted for breadth-first exploration with fairness and politeness constraints:
@@ -95,7 +95,7 @@ This project applies standard IR/crawling techniques adapted for breadth-first e
 - robots cache expiry: `robots_cache(expired_time=3600)` seconds
 - Priority weights: tune in `get_priority` (depth penalty, same-domain penalty, short-path bonus, level-2/all-domain weights)
 
-### External configuration (optional)
+### External configuration (optional; `crawler_config.json` is optional)
 Create a `crawler_config.json` to override runtime parameters without code changes:
 
 ```json
