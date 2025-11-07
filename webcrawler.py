@@ -4,8 +4,8 @@ import urllib.request
 import urllib.error
 import urllib.robotparser
 import re
-from queue import PriorityQueue
-from collections import deque, defaultdict
+from queue import PriorityQueue, Empty
+from collections import defaultdict
 from pybloom_live import ScalableBloomFilter
 import time as time_module
 import concurrent.futures
@@ -13,16 +13,13 @@ from threading import Lock
 import threading
 import tldextract
 import logging
+from logging.handlers import RotatingFileHandler
 import json
-from typing import List, Tuple, Optional, Deque, Dict, Any, Union
+from typing import List, Tuple, Optional, Dict, Any, Union
 import os
-import shutil
-
-
-logger = logging.getLogger(__name__)
-
-
 # Robots.txt cache
+
+
 class robots_cache:
     def __init__(self, expired_time: int = 3600, opener: Optional[urllib.request.OpenerDirector] = None,
                  headers: Optional[Dict[str, str]] = None, timeout: int = 60):
@@ -106,13 +103,15 @@ class webcrawler_BFS:
                  same_domain_penalty=0.35,
                  depth_penalty_shallow=0.3,
                  depth_penalty_deep=0.2,
-                 short_path_bonus=-0.1):
+                 short_path_bonus=-0.1,
+                 logger: Optional[logging.Logger] = None):
         # urls to crawl
         self.urls = urls
         for i in range(len(urls)):
             if self.urls[i][-1] != '/':
                 self.urls[i] += '/'
-        logger.info("Crawling the following urls: %s", self.urls)
+        self.logger = logger or logging.getLogger(__name__)
+        self.logger.info("Crawling the following urls: %s", self.urls)
 
         # data structures
         self.pq = PriorityQueue()
@@ -123,7 +122,6 @@ class webcrawler_BFS:
         self.links = ScalableBloomFilter(initial_capacity=bloom_initial_capacity,
                                          error_rate=bloom_error_rate)
         self.crawled = []
-        self.log = deque()
 
         # crawler settings
         self.max_depth = max_depth
@@ -146,12 +144,12 @@ class webcrawler_BFS:
                 try:
                     compiled_blocklist.append(re.compile(p))
                 except re.error as err:
-                    logging.warning(
+                    self.logger.warning(
                         'Invalid regex in query_param_blocklist: %s (%s)', p, err)
             elif isinstance(p, re.Pattern):
                 compiled_blocklist.append(p)
             else:
-                logging.warning(
+                self.logger.warning(
                     'Ignoring non-regex pattern in query_param_blocklist: %r', p)
         self.query_param_blocklist = compiled_blocklist
         # Priority weights (configurable)
@@ -189,7 +187,6 @@ class webcrawler_BFS:
         self.links_lock = Lock()
         self.pq_lock = Lock()
         self.crawled_lock = Lock()
-        self.log_lock = Lock()
         self.all_domain_freq_lock = Lock()
         self.level2_domain_freq_lock = Lock()
         self.total_domain_num_lock = Lock()
@@ -221,15 +218,17 @@ class webcrawler_BFS:
                 return headers, content, final_url, status
 
         except urllib.error.HTTPError as e:
-            print('HTTPError:', e)
+            self.logger.warning('http error while fetching %s: %s', url, e)
             return None, None, url, e.code
 
         except urllib.error.URLError as e:
-            print('URLError:', e)
-            return None, None, url, e.code if hasattr(e, 'code') else 400
+            status = e.code if hasattr(e, 'code') else 400
+            self.logger.warning('url error while fetching %s: %s', url, e)
+            return None, None, url, status
 
         except Exception as e:
-            print('Error:', e)
+            self.logger.error(
+                'unexpected error while fetching %s: %s', url, e, exc_info=True)
             return None, None, url, 500
 
     # Url handling -- Normalization, Filtering, Parsing
@@ -277,15 +276,12 @@ class webcrawler_BFS:
         return url.endswith('.nz')
 
     def isCrawlable(self, url):
+        if not url:
+            return False
         with self.visited_lock:
             if url in self.visited:
                 return False
-
-        with self.links_lock:
-            if url in self.links:
-                return False
-
-        return url and self.isHtml(url) and self.in_nz_domain(url) and self.robots_cache.can_fetch(url)
+        return self.isHtml(url) and self.in_nz_domain(url) and self.robots_cache.can_fetch(url)
 
     # Computer priority of the url
     def normalize_www(self, domain):
@@ -352,21 +348,6 @@ class webcrawler_BFS:
 
         return priority + dynamic_adjustment
 
-    # Log handling -- Writing, Reading, Printing
-    def write_log(self, time, size, depth, url, status):
-        self.log.append((time, size, depth, url, status))
-        return True
-
-    def get_log(self):
-        return self.log
-
-    def print_log(self):
-        for log in self.log:
-            time, size, depth, url, status = log
-            logging.info('Time: %s Size: %s Depth: %s URL: %s Status: %s',
-                         time, size, depth, url, status)
-        return True
-
     # Process the url and hyperlinks
     def process_url(self, priority, depth, url):
         try:
@@ -376,18 +357,26 @@ class webcrawler_BFS:
                 self.visited.add(final_url)
 
             if not content:
-                with self.log_lock:
-                    self.write_log(time_module.strftime('%Y-%m-%d %H:%M:%S',
-                                                        time_module.localtime()), '0', str(depth), final_url, str(status))
-                    return
+                self.logger.info(
+                    "status=%s depth=%s size=%s url=%s",
+                    status,
+                    depth,
+                    0,
+                    final_url,
+                )
+                return
 
             if headers and headers.get_content_type() == 'text/html':
                 page_size = len(content)
                 with self.crawled_lock:
                     self.crawled.append(final_url)
-                with self.log_lock:
-                    self.write_log(time_module.strftime(
-                        '%Y-%m-%d %H:%M:%S', time_module.localtime()), str(page_size), str(depth), final_url, str(status))
+                self.logger.info(
+                    "status=%s depth=%s size=%s url=%s",
+                    status,
+                    depth,
+                    page_size,
+                    final_url,
+                )
 
                 # Extract hyperlinks
                 soup = BeautifulSoup(
@@ -402,25 +391,33 @@ class webcrawler_BFS:
                             continue
                         link = self.normalize_url(final_url, link)
 
-                        if self.isCrawlable(link):
-                            with self.links_lock:
-                                self.links.add(link)
+                        if not self.isCrawlable(link):
+                            continue
 
-                            new_priority = self.get_priority(
-                                priority, depth, final_url, link)
+                        with self.links_lock:
+                            if link in self.links:
+                                continue
+                            self.links.add(link)
 
-                            with self.pq_lock:
-                                self.pq.put((new_priority, depth + 1, link))
-                            logging.debug('Adding: %s', link)
+                        new_priority = self.get_priority(
+                            priority, depth, final_url, link)
+
+                        with self.pq_lock:
+                            self.pq.put((new_priority, depth + 1, link))
+                        self.logger.debug('Adding: %s', link)
 
             else:
-                with self.log_lock:
-                    self.write_log(time_module.strftime('%Y-%m-%d %H:%M:%S',
-                                                        time_module.localtime()), '0', str(depth), final_url, str(status))
+                payload_size = len(content) if content else 0
+                self.logger.info(
+                    "status=%s depth=%s size=%s url=%s",
+                    status,
+                    depth,
+                    payload_size,
+                    final_url,
+                )
 
-        except Exception as e:
-            print('Error:', e)
-            pass
+        except Exception:
+            self.logger.exception('error processing url %s', url)
 
     # Execute the crawling process
     def _get_or_init_bucket(self, host: str, url_for_robots: str) -> Dict[str, float]:
@@ -453,40 +450,73 @@ class webcrawler_BFS:
             return False
 
     def crawl(self):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = []
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.max_workers)
+        active_futures: Dict[concurrent.futures.Future,
+                             Tuple[float, int, str]] = {}
+        try:
             while True:
                 with self.crawled_lock:
                     if len(self.crawled) >= self.max_crawl:
+                        self.logger.info("reached max crawl limit")
                         break
+
+                if active_futures:
+                    done, _ = concurrent.futures.wait(
+                        set(active_futures),
+                        timeout=0.1,
+                        return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+                    for future in done:
+                        priority, depth, url = active_futures.pop(future, None)
+                        try:
+                            future.result()
+                        except Exception as e:
+                            self.logger.error(
+                                "error processing %s: %s", url, e, exc_info=True)
 
                 with self.pq_lock:
-                    if self.pq.empty():
+                    pq_empty = self.pq.empty()
+
+                if pq_empty and not active_futures:
+                    self.logger.info(
+                        "queue is empty and no active tasks. crawler finished")
+                    break
+
+                while len(active_futures) < self.max_workers:
+                    try:
+                        with self.pq_lock:
+                            priority, depth, url = self.pq.get_nowait()
+                    except Empty:
                         break
-                    priority, depth, url = self.pq.get()
 
-                with self.visited_lock:
-                    if url in self.visited:
+                    with self.visited_lock:
+                        if url in self.visited:
+                            continue
+
+                    host = urlparse(url).netloc.lower()
+                    if not self._try_consume_token(host, url):
+                        with self.pq_lock:
+                            self.pq.put((priority, depth, url))
+                        time_module.sleep(0.05)
                         continue
-                    # early mark to avoid duplicate scheduling
-                    self.visited.add(url)
 
-                host = urlparse(url).netloc.lower()
-                if self._try_consume_token(host, url):
-                    logging.info('Crawling: %s', url)
-                    futures.append(executor.submit(
-                        self.process_url, priority, depth, url))
-                else:
-                    # Not ready yet, requeue and yield briefly
-                    with self.pq_lock:
-                        self.pq.put((priority, depth, url))
-                    time_module.sleep(0.05)
+                    with self.visited_lock:
+                        if url in self.visited:
+                            continue
+                        self.visited.add(url)
 
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    logging.error("An error occurred: %s", e, exc_info=True)
+                    self.logger.info(
+                        'submitting task: %s (Depth: %d)', url, depth)
+                    future = executor.submit(
+                        self.process_url, priority, depth, url)
+                    active_futures[future] = (priority, depth, url)
+
+        finally:
+            self.logger.info("closing workers...")
+            for future in active_futures:
+                future.cancel()
+            executor.shutdown(wait=True)
 
         self.completed = True
         return self.crawled
@@ -534,9 +564,7 @@ class webcrawler_task:
         self.crawl_complete = False
         self.start_time = None
         self.end_time = None
-
-        # Initialize the webcrawler
-        self.crawler = webcrawler_BFS(self.urls)
+        self.logger: Optional[logging.Logger] = None
 
         # Logging/output settings (externalizable)
         logging_config = logging_config or {}
@@ -552,10 +580,20 @@ class webcrawler_task:
             rotation_cfg.get('backup_count', 5))
 
     def start_task(self):
+        if self.logger:
+            self.logger.info("task started with %d seed urls", len(self.urls))
         self.start_time = time_module.time()
         self.crawler.crawl()
         if self.crawler.completed:
             self.end_time = time_module.time()
+            duration = self.end_time - self.start_time
+            total_crawled = self.crawler.get_count()
+            if self.logger:
+                self.logger.info(
+                    "task finished total_crawled=%s duration=%.2fs",
+                    total_crawled,
+                    duration,
+                )
         self.crawl_complete = True
 
     def _resolve_log_path(self) -> str:
@@ -564,69 +602,55 @@ class webcrawler_task:
         os.makedirs(self.log_output_dir, exist_ok=True)
         return os.path.join(self.log_output_dir, filename)
 
-    def _rotate_if_needed(self, file_path: str, fh) -> Tuple[str, Any]:
-        if not self.log_rotation_enabled:
-            return file_path, fh
-        try:
-            size = os.path.getsize(
-                file_path) if os.path.exists(file_path) else 0
-        except OSError:
-            size = 0
-        if size < self.log_rotation_max_bytes:
-            return file_path, fh
-        # Close current handle before rotating
-        try:
-            fh.close()
-        except Exception:
-            pass
-        # Rotate files: filename -> filename.1, filename.1 -> filename.2, ...
-        for i in range(self.log_rotation_backup_count - 1, 0, -1):
-            src = f"{file_path}.{i}"
-            dst = f"{file_path}.{i+1}"
-            if os.path.exists(src):
-                try:
-                    if os.path.exists(dst):
-                        os.remove(dst)
-                    shutil.move(src, dst)
-                except Exception:
-                    pass
-        # Move current file to .1
-        try:
-            dst1 = f"{file_path}.1"
-            if os.path.exists(dst1):
-                os.remove(dst1)
-            if os.path.exists(file_path):
-                shutil.move(file_path, dst1)
-        except Exception:
-            pass
-        # Reopen a fresh file
-        new_fh = open(file_path, 'a')
-        return file_path, new_fh
-
-    def get_log(self):
+    def setup_logging(self) -> RotatingFileHandler:
         file_path = self._resolve_log_path()
-        f = open(file_path, 'a')
-        try:
-            while not self.crawl_complete or self.crawler.log:
-                if self.crawler.log:
-                    time, size, depth, url, status = self.crawler.log.popleft()
-                    f.write('Time: {} Depth: {} Status: {} Size: {} URL: {}\n'.format(
-                        time, depth, status, size, url))
-                    f.flush()
-                    file_path, f = self._rotate_if_needed(file_path, f)
-                else:
-                    time_module.sleep(0.2)
+        logger_name = f'crawler.{os.path.splitext(os.path.basename(self.crawl_list_path))[0]}'
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.INFO)
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
 
-            total_crawled = self.crawler.get_count()
-            duration = (
-                self.end_time - self.start_time) if (self.end_time and self.start_time) else 0
-            f.write('Total Crawled: {} Duration: {}\n'.format(
-                total_crawled, duration))
-        finally:
-            try:
-                f.close()
-            except Exception:
-                pass
+        max_bytes = self.log_rotation_max_bytes if self.log_rotation_enabled else 0
+        handler = RotatingFileHandler(
+            file_path,
+            maxBytes=max_bytes,
+            backupCount=self.log_rotation_backup_count,
+            encoding='utf-8',
+        )
+        formatter = logging.Formatter(
+            '%(asctime)s %(levelname)s %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.propagate = False
+
+        self.logger = logger
+        return handler
+
+    def teardown_logging(self, handler: RotatingFileHandler) -> None:
+        if self.logger:
+            self.logger.removeHandler(handler)
+        handler.close()
+        self.logger = None
+
+
+def run_task(task: webcrawler_task, crawler_kwargs: Dict[str, Any]) -> None:
+    handler = task.setup_logging()
+    try:
+        crawler_options = dict(crawler_kwargs)
+        crawler_options['logger'] = task.logger
+        task.crawler = webcrawler_BFS(task.urls, **crawler_options)
+        task.start_task()
+    except Exception as exc:
+        if task.logger:
+            task.logger.exception(
+                "crawler task %s failed", task.crawl_list_path)
+        else:
+            logging.error("crawler task %s failed: %s",
+                          task.crawl_list_path, exc, exc_info=True)
+        task.crawl_complete = True
+    finally:
+        task.teardown_logging(handler)
 
 
 def load_config(path: str = 'crawler_config.json') -> Dict[str, Any]:
@@ -650,9 +674,15 @@ if __name__ == '__main__':
     log_cfg = cfg.get('logging', {})
     tasks = [webcrawler_task(seed, logging_config=log_cfg)
              for seed in seed_files]
-    for task in tasks:
-        task.crawler = webcrawler_BFS(task.urls, **crawler_kwargs)
-        task.start_task()
-        task.get_log()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = [executor.submit(run_task, task, crawler_kwargs)
+                   for task in tasks]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                logging.error("task execution raised an error: %s",
+                              exc, exc_info=True)
 
     logging.info("All tasks completed")

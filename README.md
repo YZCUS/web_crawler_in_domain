@@ -13,6 +13,7 @@ A multi-threaded web crawler centered on a BFS strategy with a priority queue, t
 - Scalable Bloom Filter to reduce duplicate enqueues
 - Custom redirect handler with a maximum redirection limit
  - Configurable headers/timeout/workers/rate-limits via `crawler_config.json`
+ - Structured logging per seed using rotating log files
 
 ### Repository Layout
 - `webcrawler.py`: main program and core classes (`robots_cache`, `Redirect_Handler`, `webcrawler_BFS`, `webcrawler_task`).
@@ -41,7 +42,7 @@ python webcrawler.py
 ```
 
 3) Outputs:
-- The crawler writes `log_<seed>.txt` (or `crawl_{seed}.log` if configured) into the configured folder. Each line contains: `Time: <timestamp> Depth: <depth> Status: <status> Size: <bytes> URL: <url>`.
+- Each seed gets its own logger that writes to `log_<seed>.txt` (or the configured pattern) under the configured output directory. Log lines follow the standard logging format and include structured fields (e.g., `status=200 depth=2 size=51234 url=https://...`).
 
 ### Core Techniques and Concepts
 This project applies standard IR/crawling techniques adapted for breadth-first exploration with fairness and politeness constraints:
@@ -89,8 +90,8 @@ This project applies standard IR/crawling techniques adapted for breadth-first e
   - Exceptions from worker futures are surfaced and logged without crashing the crawl
 
 - Logging
-  - Each processed URL logs: timestamp, content size (if HTML), depth, final URL, and HTTP status
-  - A background loop drains an internal deque and writes to `log_<seed>.txt`
+  - Each processed URL is logged immediately through the injected logger with status, depth, size, and final URL
+  - `logging.handlers.RotatingFileHandler` is used per seed list for optional size-based rotation
 
 ### Configuration Knobs (inside `webcrawler.py`)
 - `max_depth`: maximum exploration depth (default 100)
